@@ -71,7 +71,7 @@ on photos, tagging users to photos, who to follow, etc.
 | PK  | **UserID1: int** |
 | PK  | **UserID2: int** |
 
-- Store above schema in a distribute K-V store to enjoy NoSQL
+- Store above schema in a distributed K-V store to enjoy NoSQL
 - Metadata related to photos in one table (key: `PhotoID`, value: object
     containing `PhotoLocation`, `UserLocation`, etc.)
 
