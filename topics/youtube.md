@@ -21,7 +21,7 @@ views, etc.)
 
 ## Capacity Estimation and Constraints
 
-Assumptions:
+**Assumptions:**
 - 1.5 billion total users
 - 800 million daily active users
 - Users view five videos per day
@@ -35,7 +35,7 @@ Assumptions:
 **Total videos uploaded per second**: `46 K / 200 ~= 230 videos/sec`
 
 **Storage estimates for uploads:**
-`500 hours  * 60 min * 50 MB ~= 1500 GB/min, 25 GB/sec`
+`500 hours * 60 min * 50 MB ~= 1500 GB/min, 25 GB/sec`
 
 **Bandwidth estimates for uploads:**
 `500 hours * 60 min * 10 MB ~= 300 GB/min, 5 GB/sec`
@@ -93,7 +93,7 @@ TV and phone will have different resolutions and use different codecs.
 - Description
 - Size
 - Thumbnail
-- Uploader
+- Uploader/User
 - Total number of likes/dislikes/views
 
 For each video comment:
@@ -107,3 +107,122 @@ For each video comment:
 - UserID, name, email, address, age, registration details, etc.
 
 ## Detailed Component Design
+
+Service is going to be read-heavy, let's build a system that can retrieve
+videos quickly. Our read:write ratio will be 200:1, for every video upload
+there are 200 video views.
+
+**Storing videos:** Distributed file system like HDFS or GlusterFS
+
+**Managing read traffic efficiently:** Segregate read traffic from write. Since
+we have multiple copies of each video, distribute the read traffic on different
+servers. For metadata, use a master-slave configuration. Writes go to master
+first and then replayed to all slaves.
+
+This config can cause staleness in data -> when a new video is added, its
+metadata would be inserted into master first, and before it gets replayed at
+slave, our slaves would not be able to see it and will therefore return stale
+results to the user.
+
+**Storing thumbnails:** Way more thumbnails than videos. If we assume five
+thumbnails per video, we will need to have a very efficient storage system that
+can serve a huge read traffic. Two considerations for storage system:
+
+1. Thumbnails are small files - max 5KB
+2. Read traffic for thumbnails will be huge compared to videos. While watching
+   one video, users might be looking at a page that has 20 thumbnails
+
+We can't store these thumbnails on disk: we have a huge number of files and
+reading these files we have to perform a lot of seeks to different locations on
+the disk.
+
+Try using _Bigtable_. It combines multiple files into one block to store on
+disk, very efficient in reading small amount of data. Keeping hot thumbnails in
+cache will also help improve latencies, and we can easily cache a large number
+in memory.
+
+**Video uploads:** Support resume uploads from the same point.
+
+**Video encoding:** Newly uploaded videos are stored on the server, and a new
+task is added to the processing queue to encode the video into multiple
+formats. Once all the encoding is complete, uploader is notified and video is
+made available for view/sharing.
+
+## Metadata Sharding
+
+Due to the scale of our system, we need to distribute our data over multiple
+machines.
+
+**Sharding based on UserID:** Store all data for a particular user on one
+server. To search videos by title, we have to query all the servers, and each
+server will return a set of videos. A centralized server will then aggregate
+and rank these results before returning them.
+
+Issues:
+1. How to handle popular users? Lots of queries creates a performance
+   bottleneck.
+2. Some users upload many more videos than others. How to maintain uniform
+   distribution of data?
+
+**Sharding based on VideoID:** To find videos of a user, we will query all
+servers and each server will return a set of videos. This approach solves our
+problem of popular users but shifts it to popular videos.
+
+## Video Deduplication
+
+Since massive scale of video data, our service will have to deal with
+widespread video duplication. Duplicate videos often differ in aspect ratios or
+encodings, can contain overlays or additional borders, can be excerpts from a
+longer original video. Duplicate videos will have lots of impact:
+
+1. Data storage: Wasting storage space by keeping multiple copies
+2. Caching: Degraded cache efficiency by taking up space that could be used for
+   unique content
+3. Network usage: Increasing the amount of data that must be sent over the
+   network
+4. Energy consumption: All of the above can result in energy wastage
+
+For our service, deduplication makes most sense early, when a user is uploading
+a video vs. post-processing time to find duplicate videos later. As soon as any
+user starts uploading a video, our service can run a video matching algorithm
+(eg. block matching, phase correlation, etc.) to find duplicates. If newly
+uploaded video is a subpart of an existing video or vice versa, we can
+intelligently divide the video into smaller chunks, so that we only upload
+those parts that are missing.
+
+## Load Balancing
+
+Use _consistent hashing_ among our cache servers. We use a static hash-based
+scheme to map videos to hostnames. It can lead to an uneven load on the logical
+replicas due to popularity of each video. To resolve this issue, any busy
+server in one location can redirect a client to a less busy server in the same
+cache location. Use dynamic HTTP redirections for this scenario.
+
+Use of redirection has its drawbacks. Since service tries to load balance
+locally, it can lead to multiple redirects if host that receives the
+redirection can't server the video. Each redirect requires an additional HTTP
+request.
+
+## Cache
+
+Introduce a cache for metadata servers to cache hot database rows. Using
+Memcache to cache data and application servers before hitting DB can quickly
+check if the cache has the desired rows. Use LRU as a cache eviction policy.
+
+**Intelligent cache:** 80-20 rule states that 20% of daily read volume for
+videos is generation 80% of traffic. Certain videos are so popular that the
+majority of people view them, let's try caching 20% of daily read volume of
+videos and metadata.
+
+## CDN
+
+Move most popular videos to CDNs:
+- CDNs replicate content in multiple places. Better chance of a video being
+  closer to user, with fewer hops, friendlier network
+- CDN machines make heavy use of caching and can mostly serve videos out of
+  memory
+
+## Fault Tolerance
+
+Use _consistent hashing_ for distribution among database servers. It will help
+in replacing a dead server and distributing load among servers.
