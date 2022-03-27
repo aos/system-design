@@ -6,9 +6,7 @@ Design an instant messaging service like FB messenger (or Whatsapp).
 
 **Functional:**
 1. Support 1-1 conversations between users
-2. Keep track of online/offline statusest/tttttttttTtbeatbeat?
-
-of its users
+2. Keep track of online/offline statuses/heartbeat of its users
 3. Support persistent storage of chat history
 
 **Non-functional:**
